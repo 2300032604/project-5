@@ -1,17 +1,12 @@
 """
-╔══════════════════════════════════════════════════════════════╗
-║         CONTRACT REVIEW ASSISTANT  — S.NO 365               ║
-║   NVIDIA DLI Advanced DL / GenAI with LLMs                  ║
-║                                                              ║
-║   Works on:  PDF · DOCX · TXT datasets                      ║
-║   Stack:     Streamlit · LangChain · FAISS · OpenAI          ║
-╚══════════════════════════════════════════════════════════════╝
+CONTRACT REVIEW ASSISTANT — S.NO 365
+NVIDIA DLI Advanced DL / GenAI with LLMs
 
-GITHUB SETUP:
-  1. Create repo, add this file as app.py + requirements.txt
-  2. Go to share.streamlit.io → New app → pick your repo
-  3. Set secret:  OPENAI_API_KEY = "sk-..."
-  4. Deploy!
+DEPLOY TO STREAMLIT CLOUD:
+  1. Push app.py + requirements.txt to GitHub
+  2. share.streamlit.io → New app → your repo
+  3. Secrets → OPENAI_API_KEY = "sk-..."
+  4. Deploy
 
 LOCAL:
   pip install -r requirements.txt
@@ -24,16 +19,16 @@ from typing import List, Dict, Any
 
 import streamlit as st
 
-# ── LangChain (all correct paths for langchain>=0.2) ──────────
+# ── LangChain (correct split-package imports for langchain>=0.2) ──
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import (
     PyPDFLoader, Docx2txtLoader, TextLoader, CSVLoader,
 )
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain.schema import Document
+from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
+from langchain.chains import RetrievalQA          # still in langchain core
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -43,7 +38,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 CHUNK_SIZE    = 800
 CHUNK_OVERLAP = 150
 TOP_K         = 5
-DEFAULT_MODEL = "gpt-4o-mini"
 EMBED_MODEL   = "text-embedding-3-small"
 
 RISKY_KEYWORDS = [
@@ -111,7 +105,10 @@ if "audit_log" not in st.session_state:
     st.session_state["audit_log"] = []
 
 def audit(event: str, payload: dict):
-    entry = {"ts": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), "event": event, **payload}
+    entry = {
+        "ts": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "event": event, **payload,
+    }
     st.session_state["audit_log"].append(entry)
     logger.info("[AUDIT] %s | %s", event, payload)
 
@@ -143,16 +140,19 @@ def file_fingerprint(uploaded_file) -> str:
     return h
 
 # ──────────────────────────────────────────────────────────────
-#  VECTOR STORE  (cached)
+#  VECTOR STORE (cached)
 # ──────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def build_vector_store(chunks_json: str, api_key: str) -> FAISS:
-    chunks = [Document(page_content=c["text"], metadata=c["meta"]) for c in json.loads(chunks_json)]
+    chunks = [
+        Document(page_content=c["text"], metadata=c["meta"])
+        for c in json.loads(chunks_json)
+    ]
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL, openai_api_key=api_key)
     return FAISS.from_documents(chunks, embeddings)
 
 # ──────────────────────────────────────────────────────────────
-#  PROMPT
+#  PROMPT & CHAIN
 # ──────────────────────────────────────────────────────────────
 CONTRACT_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
@@ -177,22 +177,26 @@ TASK:
 ANALYSIS:""",
 )
 
-# ──────────────────────────────────────────────────────────────
-#  RAG CHAIN
-# ──────────────────────────────────────────────────────────────
+def build_chain(store: FAISS, api_key: str, model: str, top_k: int) -> RetrievalQA:
+    llm = ChatOpenAI(
+        model_name=model, temperature=0,
+        max_tokens=1500, openai_api_key=api_key,
+    )
+    retriever = store.as_retriever(
+        search_type="similarity", search_kwargs={"k": top_k}
+    )
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        chain_type_kwargs={"prompt": CONTRACT_PROMPT},
+    )
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
 def run_query(chain: RetrievalQA, query: str) -> Dict[str, Any]:
     t0 = time.perf_counter()
     result = chain.invoke({"query": query})
     return {"answer": result["result"], "latency": round(time.perf_counter() - t0, 2)}
-
-def build_chain(store: FAISS, api_key: str, model: str, top_k: int) -> RetrievalQA:
-    llm = ChatOpenAI(model_name=model, temperature=0, max_tokens=1500, openai_api_key=api_key)
-    retriever = store.as_retriever(search_type="similarity", search_kwargs={"k": top_k})
-    return RetrievalQA.from_chain_type(
-        llm=llm, chain_type="stuff", retriever=retriever,
-        chain_type_kwargs={"prompt": CONTRACT_PROMPT},
-    )
 
 # ──────────────────────────────────────────────────────────────
 #  GUARDRAILS
@@ -211,7 +215,7 @@ def scan_missing(text: str) -> List[str]:
 
 def risk_color(answer: str) -> str:
     up = answer.upper()
-    if "RISK LEVEL: HIGH" in up or "HIGH RISK" in up:   return "high"
+    if "RISK LEVEL: HIGH"   in up or "HIGH RISK"   in up: return "high"
     if "RISK LEVEL: MEDIUM" in up or "MEDIUM RISK" in up: return "medium"
     return "low"
 
@@ -221,73 +225,54 @@ def risk_color(answer: str) -> str:
 CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@700&display=swap');
-html, body, [class*="css"] { font-family:'Inter',sans-serif; }
-.stApp { background:#0d1117; color:#e6edf3; }
+html,body,[class*="css"]{font-family:'Inter',sans-serif;}
+.stApp{background:#0d1117;color:#e6edf3;}
 
-.hero { background:linear-gradient(135deg,#0d1117 0%,#161b22 60%,#1a1f29 100%);
-        border-bottom:1px solid #21262d; padding:2.5rem 2rem 2rem; text-align:center; }
-.hero-title { font-family:'Playfair Display',serif; font-size:2.5rem; font-weight:700;
-              color:#f0c040; margin:0; line-height:1.15; }
-.hero-sub   { font-size:0.93rem; color:#7d8590; margin-top:0.4rem; }
-.hero-badges{ display:flex; gap:0.45rem; justify-content:center; flex-wrap:wrap; margin-top:0.9rem; }
-.badge { background:#21262d; border:1px solid #30363d; color:#c9d1d9;
-         font-size:0.71rem; font-weight:500; padding:3px 10px; border-radius:20px; }
+.hero{background:linear-gradient(135deg,#0d1117 0%,#161b22 60%,#1a1f29 100%);
+      border-bottom:1px solid #21262d;padding:2.5rem 2rem 2rem;text-align:center;}
+.hero-title{font-family:'Playfair Display',serif;font-size:2.5rem;font-weight:700;color:#f0c040;margin:0;line-height:1.15;}
+.hero-sub{font-size:0.93rem;color:#7d8590;margin-top:0.4rem;}
+.hero-badges{display:flex;gap:0.45rem;justify-content:center;flex-wrap:wrap;margin-top:0.9rem;}
+.badge{background:#21262d;border:1px solid #30363d;color:#c9d1d9;font-size:0.71rem;font-weight:500;padding:3px 10px;border-radius:20px;}
 
-[data-testid="stSidebar"] { background:#0d1117 !important; border-right:1px solid #21262d; }
-[data-testid="stSidebar"] label { color:#8b949e !important; font-size:0.78rem;
-    font-weight:600; text-transform:uppercase; letter-spacing:0.07em; }
-[data-testid="stSidebar"] .stButton button {
-    background:#21262d; border:1px solid #30363d; color:#c9d1d9;
-    border-radius:6px; font-size:0.82rem; width:100%; }
-[data-testid="stSidebar"] .stButton button:hover { background:#30363d; border-color:#f0c040; color:#f0c040; }
+[data-testid="stSidebar"]{background:#0d1117 !important;border-right:1px solid #21262d;}
+[data-testid="stSidebar"] label{color:#8b949e !important;font-size:0.78rem;font-weight:600;text-transform:uppercase;letter-spacing:0.07em;}
+[data-testid="stSidebar"] .stButton button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;font-size:0.82rem;width:100%;}
+[data-testid="stSidebar"] .stButton button:hover{background:#30363d;border-color:#f0c040;color:#f0c040;}
 
-.card { background:#161b22; border:1px solid #21262d; border-radius:10px; padding:1.3rem 1.4rem; margin-bottom:1rem; }
-.card-title { font-size:0.71rem; font-weight:700; color:#f0c040;
-              text-transform:uppercase; letter-spacing:0.09em; margin-bottom:0.6rem; }
+.card{background:#161b22;border:1px solid #21262d;border-radius:10px;padding:1.3rem 1.4rem;margin-bottom:1rem;}
+.card-title{font-size:0.71rem;font-weight:700;color:#f0c040;text-transform:uppercase;letter-spacing:0.09em;margin-bottom:0.6rem;}
 
-.risk-high   { background:#2d1117; border-left:4px solid #f85149; border-radius:0 8px 8px 0; padding:0.9rem 1.1rem; margin:0.4rem 0; }
-.risk-medium { background:#271d0e; border-left:4px solid #e3b341; border-radius:0 8px 8px 0; padding:0.9rem 1.1rem; margin:0.4rem 0; }
-.risk-low    { background:#0d1f17; border-left:4px solid #3fb950; border-radius:0 8px 8px 0; padding:0.9rem 1.1rem; margin:0.4rem 0; }
-.risk-label-high   { color:#f85149; font-weight:700; font-size:0.78rem; letter-spacing:0.05em; }
-.risk-label-medium { color:#e3b341; font-weight:700; font-size:0.78rem; letter-spacing:0.05em; }
-.risk-label-low    { color:#3fb950; font-weight:700; font-size:0.78rem; letter-spacing:0.05em; }
+.risk-high  {background:#2d1117;border-left:4px solid #f85149;border-radius:0 8px 8px 0;padding:0.9rem 1.1rem;margin:0.4rem 0;}
+.risk-medium{background:#271d0e;border-left:4px solid #e3b341;border-radius:0 8px 8px 0;padding:0.9rem 1.1rem;margin:0.4rem 0;}
+.risk-low   {background:#0d1f17;border-left:4px solid #3fb950;border-radius:0 8px 8px 0;padding:0.9rem 1.1rem;margin:0.4rem 0;}
+.risk-label-high  {color:#f85149;font-weight:700;font-size:0.78rem;letter-spacing:0.05em;}
+.risk-label-medium{color:#e3b341;font-weight:700;font-size:0.78rem;letter-spacing:0.05em;}
+.risk-label-low   {color:#3fb950;font-weight:700;font-size:0.78rem;letter-spacing:0.05em;}
 
-.tag-pill        { display:inline-block; background:#21262d; border:1px solid #30363d; color:#8b949e;
-                   font-size:0.69rem; padding:2px 9px; border-radius:20px; margin:2px 3px 2px 0; }
-.tag-pill-red    { background:#2d1117; border-color:#f85149; color:#f85149; }
-.tag-pill-yellow { background:#271d0e; border-color:#e3b341; color:#e3b341; }
-.tag-pill-green  { background:#0d1f17; border-color:#3fb950; color:#3fb950; }
+.tag-pill       {display:inline-block;background:#21262d;border:1px solid #30363d;color:#8b949e;font-size:0.69rem;padding:2px 9px;border-radius:20px;margin:2px 3px 2px 0;}
+.tag-pill-red   {background:#2d1117;border-color:#f85149;color:#f85149;}
+.tag-pill-yellow{background:#271d0e;border-color:#e3b341;color:#e3b341;}
+.tag-pill-green {background:#0d1f17;border-color:#3fb950;color:#3fb950;}
 
-.kpi-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:0.65rem; margin:0.9rem 0; }
-.kpi-box  { background:#161b22; border:1px solid #21262d; border-radius:8px; padding:0.8rem 0.9rem; text-align:center; }
-.kpi-val  { font-size:1.5rem; font-weight:700; color:#f0c040; line-height:1; }
-.kpi-lbl  { font-size:0.66rem; color:#7d8590; margin-top:4px; text-transform:uppercase; letter-spacing:0.07em; }
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:0.65rem;margin:0.9rem 0;}
+.kpi-box {background:#161b22;border:1px solid #21262d;border-radius:8px;padding:0.8rem 0.9rem;text-align:center;}
+.kpi-val {font-size:1.5rem;font-weight:700;color:#f0c040;line-height:1;}
+.kpi-lbl {font-size:0.66rem;color:#7d8590;margin-top:4px;text-transform:uppercase;letter-spacing:0.07em;}
 
-.answer-body { color:#c9d1d9; font-size:0.91rem; line-height:1.7; white-space:pre-wrap; }
+.answer-body{color:#c9d1d9;font-size:0.91rem;line-height:1.7;white-space:pre-wrap;}
 
-.stTextArea textarea { background:#161b22 !important; border:1px solid #30363d !important;
-    color:#c9d1d9 !important; border-radius:8px !important; font-size:0.9rem !important; }
-.stTextArea textarea:focus { border-color:#f0c040 !important; box-shadow:0 0 0 2px #f0c04033 !important; }
+.stTextArea textarea{background:#161b22 !important;border:1px solid #30363d !important;color:#c9d1d9 !important;border-radius:8px !important;font-size:0.9rem !important;}
+.stTextArea textarea:focus{border-color:#f0c040 !important;box-shadow:0 0 0 2px #f0c04033 !important;}
+.stButton>button[kind="primary"]{background:linear-gradient(135deg,#f0c040,#e3a820) !important;color:#0d1117 !important;font-weight:700 !important;border:none !important;border-radius:8px !important;padding:0.6rem 2rem !important;font-size:0.9rem !important;}
+.stButton>button[kind="primary"]:hover{opacity:0.88 !important;}
+.stSelectbox>div>div{background:#161b22 !important;border:1px solid #30363d !important;color:#c9d1d9 !important;border-radius:8px !important;}
+[data-testid="stMetricValue"]{color:#f0c040 !important;font-weight:700 !important;}
+[data-testid="stMetricLabel"]{color:#7d8590 !important;font-size:0.74rem !important;}
+div[data-testid="stExpander"]{background:#161b22;border:1px solid #21262d;border-radius:8px;}
 
-.stButton > button[kind="primary"] {
-    background:linear-gradient(135deg,#f0c040,#e3a820) !important;
-    color:#0d1117 !important; font-weight:700 !important; border:none !important;
-    border-radius:8px !important; padding:0.6rem 2rem !important; font-size:0.9rem !important; }
-.stButton > button[kind="primary"]:hover { opacity:0.88 !important; }
-
-.stSelectbox > div > div { background:#161b22 !important; border:1px solid #30363d !important;
-    color:#c9d1d9 !important; border-radius:8px !important; }
-
-[data-testid="stMetricValue"] { color:#f0c040 !important; font-weight:700 !important; }
-[data-testid="stMetricLabel"] { color:#7d8590 !important; font-size:0.74rem !important; }
-
-div[data-testid="stExpander"] { background:#161b22; border:1px solid #21262d; border-radius:8px; }
-
-.audit-scroll { max-height:200px; overflow-y:auto; background:#0d1117; border:1px solid #21262d;
-    border-radius:6px; padding:8px 10px; font-family:monospace; font-size:0.71rem; color:#8b949e; }
-
-.footer { text-align:center; color:#30363d; font-size:0.71rem;
-          margin-top:2rem; padding:1rem 0; border-top:1px solid #21262d; }
+.audit-scroll{max-height:200px;overflow-y:auto;background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:8px 10px;font-family:monospace;font-size:0.71rem;color:#8b949e;}
+.footer{text-align:center;color:#30363d;font-size:0.71rem;margin-top:2rem;padding:1rem 0;border-top:1px solid #21262d;}
 </style>
 """
 
@@ -298,7 +283,6 @@ st.set_page_config(page_title="Contract Review Assistant", page_icon="⚖️",
                    layout="wide", initial_sidebar_state="expanded")
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ── Session defaults ─────────────────────────────────────────
 for k, v in {
     "store": None, "chain": None, "full_text": "",
     "file_name": "", "history": [], "index_key": "",
@@ -334,7 +318,6 @@ with st.sidebar:
         value=st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
         placeholder="sk-...", label_visibility="collapsed",
     )
-
     st.markdown("#### ⚙️ Model Settings")
     model_choice = st.selectbox("LLM", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"])
     top_k        = st.slider("Retrieval Top-K", 3, 10, TOP_K)
@@ -350,9 +333,9 @@ with st.sidebar:
             for e in logs[-15:]
         )
         st.markdown(f'<div class="audit-scroll">{log_html}</div>', unsafe_allow_html=True)
-        st.download_button("⬇ Download Log", io.BytesIO(
-            "\n".join(json.dumps(e) for e in logs).encode()
-        ), file_name="audit.jsonl", mime="application/jsonl")
+        st.download_button("⬇ Download Log",
+                           io.BytesIO("\n".join(json.dumps(e) for e in logs).encode()),
+                           file_name="audit.jsonl", mime="application/jsonl")
     else:
         st.caption("No events yet.")
 
@@ -367,7 +350,7 @@ with st.sidebar:
         st.success("Cleared. Upload a new contract.")
 
 # ══════════════════════════════════════════════════════════════
-#  MAIN — TWO COLUMNS
+#  MAIN
 # ══════════════════════════════════════════════════════════════
 left, right = st.columns([1, 1.15], gap="large")
 
@@ -401,7 +384,6 @@ with left:
             )
             chunks    = splitter.split_documents(docs)
             full_text = " ".join(d.page_content for d in docs)
-
             chunks_json = json.dumps([{"text": c.page_content, "meta": c.metadata} for c in chunks])
 
             with st.spinner("🔢 Building vector index …"):
@@ -415,7 +397,6 @@ with left:
             })
             audit("index_built", {"chunks": len(chunks)})
 
-        # ── File info ──
         full_text = st.session_state["full_text"]
         st.markdown(f"""
         <div class="card">
@@ -425,27 +406,21 @@ with left:
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Rule scan ──
         risky_kws = rule_scan_risky(full_text)
         missing   = scan_missing(full_text)
 
         if risky_kws:
             pills = "".join(f'<span class="tag-pill tag-pill-red">{kw}</span>' for kw in risky_kws[:12])
-            st.markdown(f'<div class="risk-medium"><div class="risk-label-medium">⚠️ RISKY KEYWORDS</div><div style="margin-top:5px">{pills}</div></div>',
-                        unsafe_allow_html=True)
+            st.markdown(f'<div class="risk-medium"><div class="risk-label-medium">⚠️ RISKY KEYWORDS</div><div style="margin-top:5px">{pills}</div></div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="risk-low"><span class="risk-label-low">✅ No risky keywords found</span></div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="risk-low"><span class="risk-label-low">✅ No risky keywords found</span></div>', unsafe_allow_html=True)
 
         if missing:
             pills = "".join(f'<span class="tag-pill tag-pill-yellow">{ob}</span>' for ob in missing)
-            st.markdown(f'<div class="risk-high"><div class="risk-label-high">🚨 MISSING OBLIGATIONS</div><div style="margin-top:5px">{pills}</div></div>',
-                        unsafe_allow_html=True)
+            st.markdown(f'<div class="risk-high"><div class="risk-label-high">🚨 MISSING OBLIGATIONS</div><div style="margin-top:5px">{pills}</div></div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="risk-low"><span class="risk-label-low">✅ All standard obligations present</span></div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="risk-low"><span class="risk-label-low">✅ All standard obligations present</span></div>', unsafe_allow_html=True)
 
-        # ── KPIs ──
         kpi     = st.session_state["kpi"]
         avg_lat = kpi["total_lat"] / max(kpi["queries"], 1)
         st.markdown(f"""
@@ -506,14 +481,13 @@ with right:
                     audit("query_answered", {"query": user_query[:100], "latency_s": latency, "risk": rc})
 
                     st.session_state["history"].insert(0, {
-                        "q": user_query, "a": answer, "lat": latency, "risk": rc,
-                        "ts": datetime.datetime.now().strftime("%H:%M:%S"),
+                        "q": user_query, "a": answer, "lat": latency,
+                        "risk": rc, "ts": datetime.datetime.now().strftime("%H:%M:%S"),
                     })
                 except Exception as e:
                     st.error(f"❌ API error: {e}")
                     audit("query_error", {"error": str(e)})
 
-    # ── History ──
     if st.session_state["history"]:
         for idx, item in enumerate(st.session_state["history"]):
             rc   = item["risk"]
@@ -538,10 +512,8 @@ with right:
         </div>
         """, unsafe_allow_html=True)
 
-# ── Footer ───────────────────────────────────────────────────
 st.markdown("""
 <div class="footer">
-  S.NO 365 · NVIDIA DLI Advanced DL / GenAI with LLMs ·
-  RAG · FAISS · LangChain · OpenAI · Streamlit
+  S.NO 365 · NVIDIA DLI Advanced DL / GenAI with LLMs · RAG · FAISS · LangChain · OpenAI · Streamlit
 </div>
 """, unsafe_allow_html=True)
