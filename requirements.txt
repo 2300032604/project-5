@@ -1,13 +1,5 @@
 streamlit
-openai
-langchain
-langchain-classic
-langchain-openai
-langchain-community
-langchain-core
-langchain-text-splitters
-faiss-cpu
-pypdf
-docx2txt
-tenacity
-tiktoken
+PyPDF2
+python-docx
+pandas
+openpyxl
